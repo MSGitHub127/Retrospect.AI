@@ -1,176 +1,363 @@
-# Retrospect.AI — Incident Intelligence Console
+# Backend Architecture
 
-> Enterprise-grade incident command center for live triage, memory-based incident matching, auto-generated post-mortems, and operational observability.
+Retrospect.AI uses **TanStack Start Server Functions** as its backend layer.
 
-Retrospect.AI is **not a chatbot**. It is a mission-critical operations console for Site Reliability Engineers: a three-column dashboard that streams live incidents, matches them against an institutional memory of past failures using TF-IDF cosine similarity, and produces remediation playbooks and post-mortems that can be exported to Notion / Confluence.
+Unlike a traditional React + Express architecture, there is **no separate backend service**, **no Express server**, and **no FastAPI instance** running on another port.
 
----
+The backend executes inside the same TanStack Start SSR process that serves the frontend.
 
-## Features
+## Backend Structure
 
-- **Live triage stream** — severity chips (critical / high / medium / low), region, error code, active-incident indicator, real-time list.
-- **Deep-dive analysis engine** — selected incident details, stack trace panel with line numbers, historical memory match timeline with similarity bars, and a memory-assisted remediation playbook with risk classification per step.
-- **Institutional memory** — pure TF-IDF + cosine similarity matcher over past incidents (no external embedding service required). Ports the original Python `memory_store.py` logic to TypeScript.
-- **Auto post-mortems** — one-click generation with timeline, contributing factors, action items, and lessons. Export to Markdown for Notion / Confluence.
-- **Observability panel** — system health, recall quality, match rate, p50 diagnosis latency, per-service status, and a service × failure-class confidence matrix heatmap.
-- **Dark / light themes** — dark mode is a midnight operations console; light mode is a clean infrastructure dashboard. Theme is persisted to `localStorage`.
-- **Fully responsive** — three-column dashboard on desktop, two-column on tablet, stacked (triage → analysis → observability) on mobile.
-
----
-
-## Tech stack
-
-| Layer        | Tech                                                       |
-| ------------ | ---------------------------------------------------------- |
-| Framework    | [TanStack Start](https://tanstack.com/start) (SSR React 19) |
-| Build        | Vite 7                                                     |
-| Styling      | Tailwind CSS v4 (CSS-first `@theme`, `oklch` tokens)       |
-| Components   | shadcn/ui primitives + custom Retrospect components        |
-| Data layer   | TanStack Query + `createServerFn` typed RPC                |
-| Type system  | TypeScript (strict)                                        |
-| Icons        | lucide-react                                               |
-| Fonts        | Inter (UI) + JetBrains Mono (logs, IDs, timestamps)        |
-
-> The original Streamlit prototype (Python) lives in the upstream repo as `app.py` / `memory_store.py` / `agent.py` / `incidents_data.py`. The TypeScript backend in this app preserves the same data model and matching algorithm.
-
----
-
-## Folder structure
-
-```
-src/
-├── components/
-│   ├── retrospect/              # Product-specific UI
-│   │   ├── analysis-panel.tsx   # Center column — stack trace, timeline, playbook
-│   │   ├── observability-panel.tsx # Right column — memory health + post-mortem
-│   │   ├── side-rail.tsx        # Slim left navigation rail
-│   │   ├── status-bar.tsx       # Top system status bar + theme toggle
-│   │   ├── theme-provider.tsx   # Persisted dark / light theme
-│   │   ├── triage-stream.tsx    # Left column — live incident list
-│   │   └── severity-chip.tsx
-│   └── ui/                      # shadcn/ui primitives
-├── lib/
-│   ├── retrospect/
-│   │   ├── api.functions.ts     # createServerFn endpoints
-│   │   ├── memory.ts            # TF-IDF + cosine similarity matcher
-│   │   ├── seed.ts              # PAST_INCIDENTS + LIVE_INCIDENTS
-│   │   └── types.ts             # Incident / MemoryMatch / PostMortem / SystemHealth
-│   └── utils.ts
-├── routes/
-│   ├── __root.tsx               # Root layout, fonts, ThemeProvider
-│   └── index.tsx                # Three-column dashboard
-└── styles.css                   # Tailwind v4 design tokens (dark + light)
+```text
+src/lib/retrospect/
+│
+├── api.functions.ts       # Server Function entrypoints
+├── memory.ts              # TF-IDF similarity engine
+├── incident-db.ts         # Incident persistence layer
+├── vector-store.ts        # Semantic memory store
+├── sanitizer.ts           # PII / secret redaction
+├── chunker.ts             # Log chunking pipeline
+├── playbook-registry.ts   # Mitigation playbooks
+├── llm-client.ts          # Claude-powered triage & RCA generation
+├── seed.ts                # Seed incidents
+└── types.ts               # Shared domain models
 ```
 
+## How Frontend Connects to Backend
+
+The frontend never talks directly to:
+
+* Memory store
+* Incident database
+* Vector store
+* Claude API
+* Playbook registry
+
+Instead, all communication flows through TanStack Start Server Functions.
+
+```text
+Browser UI
+    │
+    ▼
+useServerFn()
+    │
+    ▼
+api.functions.ts
+    │
+    ├── sanitizer.ts
+    ├── chunker.ts
+    ├── vector-store.ts
+    ├── incident-db.ts
+    ├── playbook-registry.ts
+    └── llm-client.ts
+```
+
+TanStack Start automatically exposes these server functions as typed RPC endpoints over HTTP.
+
+This provides:
+
+* End-to-end TypeScript safety
+* SSR compatibility
+* Automatic serialization
+* No manual REST API boilerplate
+* No Express routing layer
+
 ---
 
-## Data model
+# Incident Analysis Pipeline
+
+When an incident is analyzed, Retrospect.AI executes the following workflow:
+
+```text
+Incoming Incident
+        │
+        ▼
+Sanitize Log
+        │
+        ▼
+Chunk Log
+        │
+        ▼
+Store Chunks
+        │
+        ▼
+Memory Search
+        │
+        ▼
+Historical Match Retrieval
+        │
+        ▼
+Triage Analysis
+        │
+        ▼
+Mitigation Selection
+        │
+        ▼
+Diagnosis Response
+```
+
+## Log Sanitization
+
+Before any log reaches memory search or an LLM:
+
+* API keys are removed
+* Passwords are removed
+* JWTs are removed
+* Connection strings are removed
+* Emails and sensitive identifiers are removed
+
+This ensures sensitive infrastructure data never enters memory storage or model prompts.
+
+## Historical Memory Matching
+
+Retrospect.AI maintains an institutional memory of historical incidents.
+
+Current implementation:
+
+```text
+TF-IDF
++
+Cosine Similarity
+```
+
+Future implementation:
+
+```text
+Qdrant
++
+Embeddings
++
+Metadata Filtering
+```
+
+Historical matches are ranked and returned with similarity confidence scores.
+
+## Mitigation Engine
+
+After diagnosis:
+
+1. Historical incidents are evaluated.
+2. Matching remediation patterns are identified.
+3. Safe deterministic playbooks are selected.
+4. Human approval can be required for destructive actions.
+
+Example playbooks:
+
+* Service Restart
+* DB Connection Pool Reset
+* Canary Rollback
+* Circuit Breaker Activation
+* Heap Dump Capture
+
+---
+
+# Post-Mortem Generation Pipeline
+
+```text
+Incident
+    │
+    ▼
+Historical Match Retrieval
+    │
+    ▼
+Root Cause Analysis
+    │
+    ▼
+Timeline Generation
+    │
+    ▼
+Action Item Generation
+    │
+    ▼
+Markdown Export
+```
+
+Generated post-mortems contain:
+
+* Executive Summary
+* Timeline
+* Root Cause Analysis
+* Impact Assessment
+* Contributing Factors
+* Action Items
+* Prevention Measures
+* Lessons Learned
+
+---
+
+# Starting Retrospect.AI
+
+Retrospect.AI does not require a separate backend server.
+
+Running the application automatically starts:
+
+* Frontend
+* SSR Runtime
+* Server Functions
+* Incident Analysis Backend
+
+inside a single process.
+
+## Install Dependencies
+
+```bash
+npm install
+```
+
+## Start Development Server
+
+```bash
+npm run dev
+```
+
+This starts:
+
+```text
+TanStack Start SSR Server
++
+Frontend Application
++
+Server Functions
++
+Incident Analysis Engine
+```
+
+Default URL:
+
+```text
+http://localhost:3000
+```
+
+or
+
+```text
+http://localhost:5173
+```
+
+depending on your Vite configuration.
+
+---
+
+# Production Build
+
+Build:
+
+```bash
+npm run build
+```
+
+Preview Production Build:
+
+```bash
+npm run start
+```
+
+or
+
+```bash
+npm run preview
+```
+
+depending on your configured scripts.
+
+The production deployment hosts:
+
+* React UI
+* SSR rendering
+* Server Functions
+* Diagnosis engine
+* Post-mortem generation
+* Institutional memory
+
+inside a single deployment unit.
+
+---
+
+# Backend API Overview
+
+Server logic lives in:
+
+```text
+src/lib/retrospect/api.functions.ts
+```
+
+These functions are invoked from the frontend using:
 
 ```ts
-Incident         // Past incident in the memory store
-LiveIncident     // Real-time incident in the triage stream
-MemoryMatch      // { incident, similarity }
-Diagnosis        // { likely_root_cause, pattern_match, confidence_pct, remediation[] }
-PostMortem       // { summary, timeline, contributing_factors, action_items, lessons }
-SystemHealth     // { memory_count, match_rate_pct, median_diagnosis_seconds, services[] }
-ConfidenceCell   // { service, category, score, samples }
+useServerFn()
 ```
 
----
+and cached using:
 
-## Environment variables
-
-This app runs end-to-end with **no environment variables required** — the memory matcher is fully in-process. Optional secrets:
-
-| Variable          | Purpose                                                                     |
-| ----------------- | --------------------------------------------------------------------------- |
-| `OPENAI_API_KEY`  | Reserved for an optional LLM-backed diagnosis upgrade (currently deterministic). |
-
-Create a `.env` file at the project root if you need to set any:
-
-```
-# .env
-OPENAI_API_KEY=sk-...
+```ts
+TanStack Query
 ```
 
+## Available Server Functions
+
+| Function            | Method | Purpose                                     |
+| ------------------- | ------ | ------------------------------------------- |
+| listLiveIncidents   | GET    | Live incident triage feed                   |
+| listMemory          | GET    | Historical memory retrieval                 |
+| getSystemHealth     | GET    | Health metrics and memory quality           |
+| getConfidenceMatrix | GET    | Confidence heatmap data                     |
+| diagnose            | POST   | Memory-assisted incident diagnosis          |
+| generatePostMortem  | POST   | Generate structured post-mortem             |
+| submitFeedback      | POST   | Human-in-the-loop feedback                  |
+| approveDiagnosis    | POST   | Approve automated recommendation            |
+| rejectDiagnosis     | POST   | Reject recommendation                       |
+| modifyDiagnosis     | POST   | Correct recommendation and persist learning |
+
 ---
 
-## Installation
+# Enterprise Roadmap
 
-```bash
-# clone, then
-bun install        # or: npm install
+Current Version:
+
+```text
+TanStack Start
+      │
+      ▼
+Server Functions
+      │
+      ▼
+In-Memory Incident Intelligence
 ```
 
-## Development
+Future Enterprise Architecture:
 
-```bash
-bun run dev        # vite dev
+```text
+TanStack UI
+      │
+      ▼
+API Gateway
+      │
+ ┌────┼────┐
+ ▼    ▼    ▼
+
+Postgres
+Qdrant
+Redis
+
+      ▼
+
+LangGraph Agents
+
+      ▼
+
+Observability Stack
+
+(OpenTelemetry + LangSmith + Phoenix)
 ```
 
-Open <http://localhost:5173>.
+Planned Enhancements:
 
-## Production build
-
-```bash
-bun run build
-bun run preview
-```
-
----
-
-## Backend / API overview
-
-Server logic lives in `src/lib/retrospect/api.functions.ts` and runs as TanStack Start server functions (typed RPC over HTTP).
-
-| Function              | Method | Purpose                                                                    |
-| --------------------- | ------ | -------------------------------------------------------------------------- |
-| `listLiveIncidents`   | GET    | Real-time triage feed                                                      |
-| `listMemory`          | GET    | Indexed past incidents                                                     |
-| `getSystemHealth`     | GET    | Memory count, recall quality, per-service status                           |
-| `getConfidenceMatrix` | GET    | Service × failure-class confidence scores for the heatmap                  |
-| `diagnose`            | POST   | TF-IDF match over memory, returns `{ diagnosis, matches }`                 |
-| `generatePostMortem`  | POST   | Produces a structured post-mortem (timeline, factors, action items)        |
-
-The frontend calls them via `useServerFn` + TanStack Query so caching, retries, and loading states are handled centrally.
-
----
-
-## Theme support
-
-Tokens are defined in `src/styles.css` as `oklch()` CSS variables under `:root` (light) and `.dark` (dark). Both modes expose the same semantic tokens (`--background`, `--surface`, `--cyan`, `--crimson`, `--amber`, `--emerald`, …) so components never hard-code colors. Theme is persisted to `localStorage` under `retrospect-theme`.
-
-- **Dark**: deep obsidian background, charcoal surfaces, cyan accents, crimson reserved for critical incidents.
-- **Light**: near-white background, white surfaces, the same cyan and crimson accents, softer borders.
-
-Toggle via the moon / sun button in the top status bar.
-
----
-
-## Screenshots
-
-> Add screenshots to `docs/screenshots/` and reference them here.
-
-- `docs/screenshots/dashboard-dark.png` — three-column dashboard, dark mode
-- `docs/screenshots/dashboard-light.png` — three-column dashboard, light mode
-- `docs/screenshots/postmortem.png` — generated post-mortem export
-
----
-
-## Troubleshooting
-
-**Blank page after install** — make sure dependencies installed cleanly; clear `node_modules` and reinstall.
-
-**Fonts look wrong** — Inter / JetBrains Mono are loaded from Google Fonts in `__root.tsx`. If your network blocks `fonts.googleapis.com`, host the fonts locally or swap the `<link>` in the root route.
-
-**Tailwind classes not applying** — this project uses Tailwind v4. There is no `tailwind.config.js`; all tokens live in `src/styles.css` under `@theme inline`.
-
-**Server function 500 errors** — check the dev server console; server functions log full stack traces there. Verify your Node version is 20+.
-
-**Theme not persisting** — confirm the browser allows `localStorage` for the origin. The provider falls back to dark mode if it can't read the stored value.
-
----
-
-## License
-
-Proprietary — Retrospect.AI. Adapt freely for internal use.
+* PostgreSQL persistence
+* Qdrant semantic memory
+* Redis queues
+* LangGraph multi-agent workflows
+* OpenTelemetry tracing
+* LangSmith evaluation
+* Phoenix observability
+* Kubernetes deployment
+* Multi-tenant enterprise support
